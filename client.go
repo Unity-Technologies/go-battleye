@@ -34,9 +34,11 @@ type Client struct {
 	keepAlive  time.Duration
 	msgBufSize int
 	wg         sync.WaitGroup
+	responses  map[byte]chan string
 	fragments  map[byte]*fragmentedResponse
 	sendLock   sync.Mutex
 	lastLock   sync.Mutex
+	respLock   sync.Mutex
 	lastSend   time.Time
 
 	// done signals goroutines to stop.
@@ -44,9 +46,6 @@ type Client struct {
 
 	// login is used for receiving the login response from the BattlEye server.
 	login chan bool
-
-	// cmds is used for receiving command-type responses from the BattlEye server.
-	cmds chan string
 
 	// msgs is a buffered channel which is used for getting broadcast messages from the BattlEye server.
 	msgs chan string
@@ -75,10 +74,10 @@ func NewClient(addr string, pwd string, options ...Option) (*Client, error) {
 
 	c.done = newDone()
 	c.login = make(chan bool)
-	c.cmds = make(chan string)
 	c.msgs = make(chan string, c.msgBufSize)
 	c.errs = make(chan error)
 
+	c.responses = make(map[byte]chan string)
 	c.fragments = make(map[byte]*fragmentedResponse)
 
 	if err := c.connect(addr, pwd); err != nil {
@@ -134,8 +133,19 @@ func (c *Client) Exec(cmd string) (string, error) {
 	return "", ErrTimeout
 }
 
+// send creates a response channel, writes a new command packet to the connection and expects
+// a response in the response channel.
 func (c *Client) send(cmd string) (string, error) {
-	if err := c.write(newCommandPacket(cmd, c.seq())); err != nil {
+	seq := c.seq()
+
+	// Open a response channel for the current sequence number. Since send is synchronized we
+	// won't override an existing channel here.
+	ch := make(chan string)
+	c.respLock.Lock()
+	c.responses[seq] = ch
+	c.respLock.Unlock()
+
+	if err := c.write(newCommandPacket(cmd, seq)); err != nil {
 		return "", err
 	}
 
@@ -150,7 +160,7 @@ func (c *Client) send(cmd string) (string, error) {
 		return "", ErrTimeout
 	case err := <-c.errs:
 		return "", err
-	case resp := <-c.cmds:
+	case resp := <-ch:
 		return resp, nil
 	}
 }
@@ -257,26 +267,34 @@ func (c *Client) receiver() {
 	}
 }
 
-// handleCommandResponse forwards CommandResponses to the cmds channel. If the message is
+// handleCommandResponse forwards CommandResponses to the right channel if that exists. If the message is
 // fragmented it is reassembled beforehand.
 func (c *Client) handleCommandResponse(r *commandResponse) {
-	// If the received response is either:
+	c.respLock.Lock()
+	defer c.respLock.Unlock()
+
+	// Check if there is an open response channel for the current response. If not it means that
+	// this response is either:
 	// - an old one that we've already processed (sequence number is less than what we expect);
 	// - or an unsolicited one (sequence number it totally different from what we expect);
-	// just drop it.
-	if r.seq != c.seq() {
+	// So just drop it.
+	ch, ok := c.responses[r.seq]
+	if !ok {
 		return
 	}
 
 	// response is not fragmented.
 	if !r.multi {
-		c.cmds <- r.msg
+		ch <- r.msg
+		// Clean up the response channel.
+		close(ch)
+		delete(c.responses, r.seq)
 		return
 	}
 
 	// Add the partial message to the already received parts.
 	var fr *fragmentedResponse
-	fr, ok := c.fragments[r.seq]
+	fr, ok = c.fragments[r.seq]
 	if !ok {
 		fr = newFragmentedResponse(r.multiSize)
 		c.fragments[r.seq] = fr
@@ -285,7 +303,10 @@ func (c *Client) handleCommandResponse(r *commandResponse) {
 
 	// If the message is complete send it.
 	if fr.completed() {
-		c.cmds <- fr.message()
+		ch <- fr.message()
+		// Clean up the response channel.
+		close(ch)
+		delete(c.responses, r.seq)
 	}
 }
 
