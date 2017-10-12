@@ -26,6 +26,11 @@ const (
 	clientTimeout = 45 * time.Second
 )
 
+var (
+	// keepAliveCheck is the check interval for keepalives
+	keepAliveCheck = time.Second
+)
+
 // Client represents a BattlEye client.
 type Client struct {
 	conn       net.Conn
@@ -125,8 +130,6 @@ func (c *Client) Exec(cmd string) (string, error) {
 			}
 			return "", err
 		}
-		// Increment because we've got a response.
-		c.incr()
 		return resp, nil
 	}
 
@@ -193,7 +196,7 @@ func (c *Client) connect(addr, pwd string) (err error) {
 func (c *Client) keepConnectionAlive() {
 	defer c.wg.Done()
 
-	t := time.NewTicker(time.Second)
+	t := time.NewTicker(keepAliveCheck)
 	for {
 		select {
 		case <-c.done.C():
@@ -270,6 +273,7 @@ func (c *Client) handleCommandResponse(r *commandResponse) {
 
 	// response is not fragmented.
 	if !r.multi {
+		c.incr()
 		c.cmds <- r.msg
 		return
 	}
@@ -285,6 +289,7 @@ func (c *Client) handleCommandResponse(r *commandResponse) {
 
 	// If the message is complete send it.
 	if fr.completed() {
+		c.incr()
 		c.cmds <- fr.message()
 	}
 }

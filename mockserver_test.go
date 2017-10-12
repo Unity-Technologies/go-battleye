@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	testTimeout       = 100 * time.Millisecond
+	testTimeout       = time.Second
 	testAddress       = "127.0.0.1:0"
 	testServerMessage = "server broadcast"
 )
@@ -138,11 +138,11 @@ func (s *server) serve() {
 	}
 }
 
-// messenger sends a server message per second to each known client.
+// messenger sends a server message to each known client regularly.
 func (s *server) messenger() {
 	defer s.wg.Done()
 
-	t := time.NewTicker(1 * time.Second)
+	t := time.NewTicker(time.Millisecond * 100)
 	defer t.Stop()
 
 	for {

@@ -1,6 +1,7 @@
 package battleye
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ func TestClient(t *testing.T) {
 		name           string
 		clientPassword string
 		clientOpts     []Option
+		keepAliveCheck time.Duration
 		expClientErr   error
 		closesClient   bool
 		testfunc       func(*testing.T, *Client, *server)
@@ -54,9 +56,10 @@ func TestClient(t *testing.T) {
 			},
 		},
 		{
-			name:         "Successful login, keep-alive and execute command",
-			clientOpts:   []Option{Timeout(testTimeout), KeepAlive(200 * time.Millisecond), MessageBuffer(10)},
-			closesClient: true,
+			name:           "Successful login, keep-alive and execute command",
+			clientOpts:     []Option{Timeout(testTimeout), KeepAlive(200 * time.Millisecond), MessageBuffer(10)},
+			closesClient:   true,
+			keepAliveCheck: time.Millisecond * 10,
 			testfunc: func(t *testing.T, c *Client, s *server) {
 				defer func() {
 					if !assert.NoError(t, c.Close()) {
@@ -64,7 +67,8 @@ func TestClient(t *testing.T) {
 					}
 
 					// mock server must have received some keep alive packets
-					assert.True(t, s.keepAlive() >= 1)
+					v := s.keepAlive()
+					assert.True(t, v >= 1, fmt.Sprintf("keep-alive: %v not greater than one", v))
 					// mock server must have received some server message acknowledge packets
 					assert.True(t, s.srvMsgAck() >= 1)
 					// we must have received at least 1 server message
@@ -114,6 +118,12 @@ func TestClient(t *testing.T) {
 
 			if tc.clientPassword == "" {
 				tc.clientPassword = testPassword
+			}
+
+			if tc.keepAliveCheck > 0 {
+				old := keepAliveCheck
+				keepAliveCheck = tc.keepAliveCheck
+				defer func() { keepAliveCheck = old }()
 			}
 
 			c, err := NewClient(s.Addr, tc.clientPassword, tc.clientOpts...)
